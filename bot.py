@@ -17,7 +17,7 @@ BOT_TOKEN = "2017218286:AAGh_0CO3bOyOJ-UkPDGJvITYwguA25icw4"
 ADMIN_ID = 1148510962
 ADMIN_USER = "@M1000j"
 INSTA_FOLLOW_LINK = "https://instagram.com/user98eh70s2"
-DB_FILE = "bot_database_v3.db"
+DB_FILE = "bot_database_v7.db"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -31,8 +31,8 @@ async def init_db():
                   attempts INTEGER DEFAULT 0, last_use TEXT, is_vip INTEGER DEFAULT 0, state TEXT)''')
         await db.execute('CREATE TABLE IF NOT EXISTS hidden (target TEXT PRIMARY KEY)')
         await db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
-        # إضافة مفتاح API افتراضي إذا لم يوجد
         await db.execute('INSERT OR IGNORE INTO settings VALUES ("api_key", "fc2b9d4e-1618-4483-b9f7-309011e57713")')
+        await db.execute('INSERT OR IGNORE INTO settings VALUES ("bot_status", "on")')
         await db.commit()
 
 async def db_exec(query, params=(), fetch=None):
@@ -47,7 +47,6 @@ async def db_exec(query, params=(), fetch=None):
 # 🔍 محرك البحث (HasData API)
 # ==========================================
 async def get_comments(target):
-    # التحقق من الإخفاء
     is_hidden = await db_exec("SELECT 1 FROM hidden WHERE target = ?", (target.lower(),), fetch="one")
     if is_hidden: return "HIDDEN"
 
@@ -77,18 +76,21 @@ async def get_comments(target):
         except: return []
 
 # ==========================================
-# 🤖 التعامل مع التدفق (Flow)
+# 🤖 لوحة التحكم ومعالجة التدفق
 # ==========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # إشعار الأدمن بدخول شخص جديد
+    status = await db_exec("SELECT value FROM settings WHERE key = 'bot_status'", fetch="one")
+    if status and status[0] == "off" and user.id != ADMIN_ID:
+        return await update.message.reply_text("🛠️ عذراً، البوت واقف حالياً قيد التطوير.. ارجع بعد شوي.")
+
     is_new = await db_exec("SELECT 1 FROM users WHERE user_id = ?", (user.id,), fetch="one")
     if not is_new:
         await db_exec("INSERT INTO users (user_id, username, name, state) VALUES (?, ?, ?, ?)", 
                       (user.id, user.username, user.full_name, "START"))
-        await context.bot.send_message(ADMIN_ID, f"🔔 <b>دخول مستخدم جديد:</b>\nالاسم: {user.full_name}\nاليوزر: @{user.username}\nالآيدي: <code>{user.id}</code>", parse_mode="HTML")
+        await context.bot.send_message(ADMIN_ID, f"🔔 <b>دخول مستخدم جديد:</b>\nالاسم: {user.full_name}\nاليوزر: @{user.username}", parse_mode="HTML")
 
-    msg = "⚠️ <b>تنبيه هام:</b>\nهذا البوت مخصص للاستخدام التعليمي والبحث العلني فقط. أنت المسؤول عن سوء استخدام البيانات."
+    msg = "⚠️ <b>تنبيه هام:</b>\nهذا البوت مخصص للاستخدام التعليمي والبحث العلني فقط."
     kb = [[InlineKeyboardButton("✅ موافق وأتعهد", callback_data="flow_agree")]]
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
@@ -98,121 +100,96 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     await query.answer()
 
-    if data == "flow_agree":
-        msg = "🚀 <b>خطوة أخيرة:</b>\nلاستخدام البوت، يجب متابعة حساب صاحب البوت أولاً."
-        kb = [[InlineKeyboardButton("📸 اضغط هنا لمتابعتي", url=INSTA_FOLLOW_LINK)],
-              [InlineKeyboardButton("✅ تم المتابعة", callback_data="flow_followed")]]
+    if data == "adm_toggle":
+        if user_id != ADMIN_ID: return
+        current = await db_exec("SELECT value FROM settings WHERE key = 'bot_status'", fetch="one")
+        new_status = "off" if current[0] == "on" else "on"
+        await db_exec("UPDATE settings SET value = ? WHERE key = 'bot_status'", (new_status,))
+        await query.edit_message_text(f"✅ تم تغيير حالة البوت إلى: **{new_status.upper()}**")
+        await admin_panel(update, context)
+
+    elif data == "flow_hide_me":
+        # الرسالة التي طلبتها
+        await query.message.reply_text(f"🛡️ لطلب خدمة إخفاء حسابك من نتائج البحث، يرجى التواصل مع الإدارة: {ADMIN_USER}")
+
+    elif data == "flow_agree":
+        msg = "🚀 تابع المطور للمتابعة:"
+        kb = [[InlineKeyboardButton("📸 تابعني هنا", url=INSTA_FOLLOW_LINK)],
+              [InlineKeyboardButton("✅ تم المتابعة", callback_data="flow_main_menu")]]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif data == "flow_followed":
-        u = await db_exec("SELECT is_vip FROM users WHERE user_id = ?", (user_id,), fetch="one")
-        limit = 30 if u and u[0] else 3
-        msg = f"✅ <b>تم التحقق!</b>\nلديك {limit} محاولات بحث يومية مجانية.\n\n(يتم تصفير المحاولات كل 24 ساعة)"
-        kb = [[InlineKeyboardButton("🚀 ابدأ البحث الآن", callback_data="flow_start_search")]]
+    elif data == "flow_main_menu":
+        msg = "🌟 **القائمة الرئيسية:**\nأهلاً بك، اختر الخدمة المطلوبة:"
+        kb = [
+            [InlineKeyboardButton("🔍 ابدأ البحث عن يوزر", callback_data="flow_start_search")],
+            [InlineKeyboardButton("🛡️ إخفاء حسابي", callback_data="flow_hide_me")]
+        ]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
     elif data == "flow_start_search":
-        await query.edit_message_text("📝 <b>أرسل الآن يوزر الشخص المطلوب بدون @:</b>", parse_mode="HTML")
+        await query.edit_message_text("📝 أرسل يوزر الشخص المطلوب بدون @:")
         await db_exec("UPDATE users SET state = 'WAITING_USER' WHERE user_id = ?", (user_id,))
 
-    # أوامر الأدمن (التحكم)
-    elif data.startswith("adm_"):
-        if user_id != ADMIN_ID: return
-        action = data.split("_")[1]
-        if action == "setkey": await query.message.reply_text("أرسل مفتاح API HasData الجديد:")
-        elif action == "hide": await query.message.reply_text("أرسل اليوزر الذي تريد إخفاءه:")
-        elif action == "vip": await query.message.reply_text("أرسل آيدي الشخص لتفعيله VIP:")
-        elif action == "unvip": await query.message.reply_text("أرسل آيدي الشخص لإزالة VIP:")
-        elif action == "bc": await query.message.reply_text("أرسل الرسالة التي تريد إذاعتها:")
-        context.user_data['adm_action'] = action
+    elif data == "adm_stats":
+        total = await db_exec("SELECT COUNT(*) FROM users", fetch="one")
+        await query.message.reply_text(f"📊 إجمالي المستخدمين: {total[0]}")
+
+    elif data == "adm_setkey":
+        context.user_data['adm_action'] = "setkey"
+        await query.message.reply_text("📥 أرسل مفتاح API الجديد أو 'إلغاء':")
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # معالجة أوامر الأدمن
-    if user_id == ADMIN_ID and 'adm_action' in context.user_data:
-        action = context.user_data.pop('adm_action')
-        if action == "setkey":
-            await db_exec("UPDATE settings SET value = ? WHERE key = 'api_key'", (text,))
-            await update.message.reply_text("✅ تم تحديث مفتاح API بنجاح.")
-        elif action == "hide":
-            await db_exec("INSERT OR IGNORE INTO hidden VALUES (?)", (text.lower().replace("@",""),))
-            await update.message.reply_text(f"✅ تم إخفاء اليوزر {text} بنجاح.")
-        elif action == "vip":
-            await db_exec("UPDATE users SET is_vip = 1 WHERE user_id = ?", (text,))
-            await update.message.reply_text(f"✅ تم تفعيل VIP للآيدي {text}.")
-        elif action == "unvip":
-            await db_exec("UPDATE users SET is_vip = 0 WHERE user_id = ?", (text,))
-            await update.message.reply_text(f"✅ تم إلغاء VIP للآيدي {text}.")
-        elif action == "bc":
-            users = await db_exec("SELECT user_id FROM users", fetch="all")
-            for u in users:
-                try: await context.bot.send_message(u[0], f"📢 <b>إعلان من الإدارة:</b>\n\n{text}", parse_mode="HTML")
-                except: pass
-            await update.message.reply_text("✅ تمت الإذاعة.")
+    status = await db_exec("SELECT value FROM settings WHERE key = 'bot_status'", fetch="one")
+    if status and status[0] == "off" and user_id != ADMIN_ID:
+        return await update.message.reply_text("🛠️ البوت واقف حالياً للتطوير..")
+
+    if user_id == ADMIN_ID and context.user_data.get('adm_action') == "setkey":
+        if text == "إلغاء":
+            context.user_data.pop('adm_action')
+            return await update.message.reply_text("❌ تم الإلغاء.")
+        await db_exec("UPDATE settings SET value = ? WHERE key = 'api_key'", (text,))
+        context.user_data.pop('adm_action')
+        await update.message.reply_text("✅ تم تحديث المفتاح!")
         return
 
-    # معالجة البحث للمستخدمين
-    u_state = await db_exec("SELECT state, attempts, last_use, is_vip FROM users WHERE user_id = ?", (user_id,), fetch="one")
+    u_state = await db_exec("SELECT state FROM users WHERE user_id = ?", (user_id,), fetch="one")
     if u_state and u_state[0] == 'WAITING_USER':
-        target = text.lower().replace("@", "")
-        att, last, is_vip = u_state[1], u_state[2], u_state[3]
-        limit = 30 if is_vip else 3
-        now = datetime.now()
-
-        # التصفير اليومي
-        if last and datetime.strptime(last, '%Y-%m-%d %H:%M:%S') + timedelta(days=1) < now:
-            att = 0
-
-        if att >= limit:
-            return await update.message.reply_text(f"❌ انتهت محاولاتك اليومية ({limit}).\nتواصل مع {ADMIN_USER} لزيادة المحاولات.")
-
-        loading = await update.message.reply_text(f"⏳ <b>جاري البحث عن تعليقات {target}...</b>", parse_mode="HTML")
+        await context.bot.send_message(ADMIN_ID, f"🔍 <b>بحث جديد:</b>\nمن: {update.effective_user.full_name}\nعن: <code>{text}</code>", parse_mode="HTML")
         
-        results = await get_comments(target)
-
+        loading = await update.message.reply_text("⏳ جاري البحث...")
+        results = await get_comments(text.replace("@",""))
+        
         if results == "HIDDEN":
-            await loading.edit_text(f"🚫 تم إخفاء هذا اليوزر عبر الإدارة.\nلإخفاء يوزرك تواصل مع: {ADMIN_USER}")
-        elif results == "KEY_EXPIRED":
-            await loading.edit_text("⚠️ عذراً، انتهت صلاحية مفتاح البحث. تم إخطار الأدمن.")
-            await context.bot.send_message(ADMIN_ID, "🚨 <b>تنبيه:</b> مفتاح HasData API انتهى أو غير صالح!")
-        elif results:
+             await loading.edit_text("🛡️ عذراً، هذا الحساب محمي بخدمة VIP ولا يمكن البحث عنه.")
+        elif results and isinstance(results, list):
             await loading.delete()
-            for i, res in enumerate(results[:10], 1): # عرض أول 10 نتائج
-                msg = f"💬 <b>التعليق {i}:</b>\n{res['text']}\n\n🔗 <b>رابط المنشور:</b> {res['link']}\n\n"
-                msg += f"👨‍💻 المطور: {ADMIN_USER}"
-                await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
-            await db_exec("UPDATE users SET attempts = ?, last_use = ? WHERE user_id = ?", (att+1, now.strftime('%Y-%m-%d %H:%M:%S'), user_id))
+            for res in results[:5]:
+                await update.message.reply_text(f"💬 {res['text']}\n🔗 {res['link']}", disable_web_page_preview=True)
         else:
-            await loading.edit_text("❌ لم يتم العثور على نتائج عامة لهذا اليوزر.")
+            await loading.edit_text("❌ لا توجد نتائج.")
 
 # ==========================================
 # 🛠️ لوحة الأدمن
 # ==========================================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
+    status = await db_exec("SELECT value FROM settings WHERE key = 'bot_status'", fetch="one")
+    toggle_btn = "🔴 إيقاف البوت" if status[0] == "on" else "🟢 تشغيل البوت"
     kb = [
-        [InlineKeyboardButton("🔑 تحديث API Key", callback_data="adm_setkey")],
-        [InlineKeyboardButton("🛡️ إخفاء يوزر", callback_data="adm_hide")],
-        [InlineKeyboardButton("🌟 تفعيل VIP", callback_data="adm_vip"), InlineKeyboardButton("❌ إلغاء VIP", callback_data="adm_unvip")],
-        [InlineKeyboardButton("📢 إذاعة جماعية", callback_data="adm_bc")]
+        [InlineKeyboardButton(toggle_btn, callback_data="adm_toggle")],
+        [InlineKeyboardButton("📊 إحصائيات", callback_data="adm_stats"), InlineKeyboardButton("🔑 تحديث API", callback_data="adm_setkey")]
     ]
-    await update.message.reply_text("📊 <b>لوحة تحكم المدير:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+    await update.message.reply_text("📊 لوحة التحكم:", reply_markup=InlineKeyboardMarkup(kb))
 
-# ==========================================
-# 🚀 الإطلاق
-# ==========================================
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
     loop.run_until_complete(init_db())
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('admin', admin_panel))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
-    
-    print("🚀 البوت الاحترافي يعمل الآن...")
     app.run_polling()
-      
